@@ -126,7 +126,7 @@ func (s *SonarrClient) UnmonitorEpisodes(ids []int64) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	return s.req(http.MethodPut, "/api/v3/episode/editor", nil,
+	return s.req(http.MethodPut, "/api/v3/episode/monitor", nil,
 		map[string]any{"episodeIds": ids, "monitored": false})
 }
 

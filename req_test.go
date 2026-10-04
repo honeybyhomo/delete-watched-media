@@ -24,7 +24,7 @@ func TestReqNilBodyNoPanic(t *testing.T) {
 			return NewSonarrClient(srv.URL, "k").req(http.MethodDelete, "/api/v3/episodeFile/1", nil, nil)
 		}},
 		{"sonarr put with body", func() error {
-			return NewSonarrClient(srv.URL, "k").req(http.MethodPut, "/api/v3/episode/editor", nil,
+			return NewSonarrClient(srv.URL, "k").req(http.MethodPut, "/api/v3/episode/monitor", nil,
 				map[string]any{"episodeIds": []int64{1}, "monitored": false})
 		}},
 		{"radarr delete nil body", func() error {
