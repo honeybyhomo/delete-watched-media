@@ -79,6 +79,37 @@ func TestGqlSendsBearerAndBody(t *testing.T) {
 	}
 }
 
+func TestGqlAppendsGraphqlPath(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer srv.Close()
+	for _, base := range []string{srv.URL, srv.URL + "/"} {
+		c := NewScryerClient(base, "k")
+		if err := c.gql("query { x }", nil, nil); err != nil {
+			t.Fatalf("gql(%s): %v", base, err)
+		}
+		if gotPath != "/graphql" {
+			t.Errorf("base %s → path %s, want /graphql", base, gotPath)
+		}
+	}
+	// A caller who already passes the full endpoint is not double-suffixed.
+	full := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	defer full.Close()
+	c := NewScryerClient(full.URL+"/graphql", "k")
+	if err := c.gql("query { x }", nil, nil); err != nil {
+		t.Fatalf("gql(full endpoint): %v", err)
+	}
+	if gotPath != "/graphql" {
+		t.Errorf("full endpoint → path %s, want /graphql", gotPath)
+	}
+}
+
 func TestTitleByExternalIDFound(t *testing.T) {
 	srv, reqs := fakeGraphQL(t, func(q string) any {
 		if strings.Contains(q, "titlesByExternalIds") {

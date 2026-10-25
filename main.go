@@ -44,7 +44,7 @@ func main() {
 		retryInterval = interval
 	}
 
-	slog.Info("deletewatchedarr starting",
+	slog.Info("delete-watched-media starting",
 		"movie_retention_days", cfg.MovieRetentionDays,
 		"episode_retention_days", cfg.EpisodeRetentionDays,
 		"interval", interval,

@@ -50,12 +50,12 @@ func (c *Cleaner) processMovies(uid string) error {
 	}
 	cutoff := time.Now().Add(-time.Duration(c.cfg.MovieRetentionDays) * 24 * time.Hour)
 
-	type pendingDelete struct {
+	type pendingMovie struct {
 		id    string
 		title string
 	}
-	var unmonitorIDs []string
-	var deletes []pendingDelete
+	var unmonitor []pendingMovie
+	var deletes []pendingMovie
 
 	for _, it := range items {
 		tmdb := providerID(it.ProviderIDs, "Tmdb")
@@ -73,23 +73,25 @@ func (c *Cleaner) processMovies(uid string) error {
 			continue
 		}
 		if c.cfg.UnmonitorOnWatch && m.Monitored {
-			unmonitorIDs = append(unmonitorIDs, m.ID)
+			unmonitor = append(unmonitor, pendingMovie{id: m.ID, title: it.Name})
 		}
 		if pastRetention(it.UserData, cutoff) && m.FileCount > 0 {
-			deletes = append(deletes, pendingDelete{id: m.ID, title: it.Name})
+			deletes = append(deletes, pendingMovie{id: m.ID, title: it.Name})
 		}
 	}
 
-	for _, id := range unmonitorIDs {
+	for _, m := range unmonitor {
 		if c.cfg.DryRun {
-			slog.Info("[dry-run] would unmonitor movie", "title_id", id)
+			slog.Info("[dry-run] would unmonitor movie", "title", m.title)
 			continue
 		}
-		if err := c.scryer.SetTitleMonitored(id, false); err != nil {
-			slog.Error("unmonitor movie failed", "title_id", id, "error", err)
+		if err := c.scryer.SetTitleMonitored(m.id, false); err != nil {
+			slog.Error("unmonitor movie failed", "title", m.title, "error", err)
 		}
 	}
-	slog.Info("unmonitored movies", "count", len(unmonitorIDs))
+	if len(unmonitor) > 0 {
+		slog.Info("unmonitored movies", "count", len(unmonitor))
+	}
 
 	for _, d := range deletes {
 		if c.cfg.DryRun {
@@ -167,9 +169,12 @@ func (c *Cleaner) processEpisodes(uid string) error {
 			idx[epKey(season, episode)] = se
 		}
 
-		var unmonitorIDs []string
-		var deleteIDs []string
-		var deleteLabels []string
+		type pendingEpisode struct {
+			id    string
+			label string
+		}
+		var unmonitor []pendingEpisode
+		var deletes []pendingEpisode
 
 		for _, je := range watchedEps {
 			if je.ParentIndexNumber == nil || je.IndexNumber == nil {
@@ -181,41 +186,46 @@ func (c *Cleaner) processEpisodes(uid string) error {
 			}
 			label := fmt.Sprintf("%s S%02dE%02d", ss.Name, *je.ParentIndexNumber, *je.IndexNumber)
 			if c.cfg.UnmonitorOnWatch && se.Monitored {
-				unmonitorIDs = append(unmonitorIDs, se.ID)
+				unmonitor = append(unmonitor, pendingEpisode{id: se.ID, label: label})
 			}
 			if pastRetention(je.UserData, cutoff) && se.HasFile {
-				deleteIDs = append(deleteIDs, se.ID)
-				deleteLabels = append(deleteLabels, label)
+				deletes = append(deletes, pendingEpisode{id: se.ID, label: label})
 			}
 		}
 
-		for _, id := range unmonitorIDs {
+		for _, e := range unmonitor {
 			if c.cfg.DryRun {
-				slog.Info("[dry-run] would unmonitor episode", "series", ss.Name, "episode_id", id)
+				slog.Info("[dry-run] would unmonitor episode", "episode", e.label)
 				continue
 			}
-			if err := c.scryer.SetEpisodeMonitored(id, false); err != nil {
-				slog.Error("unmonitor episode failed", "series", ss.Name, "episode_id", id, "error", err)
+			if err := c.scryer.SetEpisodeMonitored(e.id, false); err != nil {
+				slog.Error("unmonitor episode failed", "episode", e.label, "error", err)
 			}
 		}
-		if len(unmonitorIDs) > 0 {
-			slog.Info("unmonitored episodes", "series", ss.Name, "count", len(unmonitorIDs))
+		if len(unmonitor) > 0 {
+			slog.Info("unmonitored episodes", "series", ss.Name, "count", len(unmonitor))
 		}
 
-		if len(deleteIDs) == 0 {
+		if len(deletes) == 0 {
 			continue
 		}
+		labels := make([]string, len(deletes))
+		ids := make([]string, len(deletes))
+		for i, d := range deletes {
+			labels[i] = d.label
+			ids[i] = d.id
+		}
 		if c.cfg.DryRun {
-			for _, l := range deleteLabels {
+			for _, l := range labels {
 				slog.Info("[dry-run] would delete episode file", "episode", l)
 			}
 			continue
 		}
-		n, err := c.scryer.DeleteEpisodeFiles(ss.ID, deleteIDs)
+		n, err := c.scryer.DeleteEpisodeFiles(ss.ID, ids)
 		if err != nil {
-			slog.Error("delete episode files failed", "series", ss.Name, "episodes", deleteLabels, "error", err)
+			slog.Error("delete episode files failed", "series", ss.Name, "episodes", labels, "error", err)
 		} else {
-			slog.Info("deleted episode files", "series", ss.Name, "episodes", deleteLabels, "files", n)
+			slog.Info("deleted episode files", "series", ss.Name, "episodes", labels, "files", n)
 		}
 	}
 	return nil

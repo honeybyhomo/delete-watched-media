@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -17,7 +18,17 @@ type ScryerClient struct {
 }
 
 func NewScryerClient(baseURL, apiKey string) *ScryerClient {
-	return &ScryerClient{baseURL: baseURL, apiKey: apiKey, http: &http.Client{Timeout: 30 * time.Second}}
+	return &ScryerClient{baseURL: graphqlEndpoint(baseURL), apiKey: apiKey, http: &http.Client{Timeout: 30 * time.Second}}
+}
+
+// graphqlEndpoint accepts either a base URL ("http://scryer:8080") or the full
+// GraphQL endpoint ("http://scryer:8080/graphql") and returns the latter.
+func graphqlEndpoint(baseURL string) string {
+	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	if err != nil || u.Path == "" {
+		return strings.TrimRight(baseURL, "/") + "/graphql"
+	}
+	return strings.TrimRight(baseURL, "/")
 }
 
 // gql runs one GraphQL operation. Scryer returns HTTP 200 with an "errors"
