@@ -285,6 +285,18 @@ func (s *ScryerClient) DeleteEpisodeFiles(titleID string, episodeIDs []string) (
 	}}, &out); err != nil {
 		return 0, fmt.Errorf("delete episode files %s: %w", titleID, err)
 	}
+	res := out.DeleteEpisodeFiles
+	if res.FailedCount > 0 {
+		// Partial failure: HTTP 200 + no errors[] but files remain on disk.
+		// Surface it — the affected episodes keep their files and are
+		// retried on a later cycle.
+		return res.FileCount, fmt.Errorf("delete episode files %s: %d of %d selected episode(s) failed (files deleted: %d) — will retry next cycle",
+			titleID, res.FailedCount, len(episodeIDs), res.FileCount)
+	}
+	if res.FileCount > 0 {
+		return res.FileCount, nil
+	}
+	// Server tolerated a null/zero count payload; fall back to the preview.
 	return p.TotalFileCount, nil
 }
 

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -298,5 +300,112 @@ func TestDryRunMakesNoMutations(t *testing.T) {
 	}
 	if lookups != 2 {
 		t.Errorf("expected 2 lookups (movie+series), got %d", lookups)
+	}
+}
+
+func TestMovieFacetMismatchSkipped(t *testing.T) {
+	// A watched movie's TMDB id must only ever act on a MOVIE-faceted title.
+	// TMDB movie and TV number spaces are independent; if the lookup ever
+	// resolves to a series, acting on it would delete a whole series' files.
+	respond := func(q string, vars map[string]any) any {
+		if strings.Contains(q, "titlesByExternalIds") {
+			return map[string]any{"titlesByExternalIds": []map[string]any{{
+				"id": "S77", "name": "Some Series", "facet": "SERIES", "monitored": true,
+				"mediaFiles": []map[string]any{{"id": "f1"}},
+			}}}
+		}
+		t.Errorf("unexpected query: %.80s", q)
+		return nil
+	}
+	c, reqs := newCleanerFixture(t, testConfig(false),
+		jellyfinResponder(t, []string{watchedMovieOld()}, nil, nil), respond)
+	if err := c.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := mutationKinds(*reqs); len(got) != 0 {
+		t.Errorf("facet mismatch produced mutations: %v", got)
+	}
+}
+
+func TestSeriesFacetMismatchSkipped(t *testing.T) {
+	// The series pipeline's TVDB lookup must not act on a MOVIE-faceted
+	// title (collision in the other direction); the whole series is skipped
+	// before any episodes are even fetched.
+	respond := func(q string, vars map[string]any) any {
+		if strings.Contains(q, "titlesByExternalIds") {
+			return map[string]any{"titlesByExternalIds": []map[string]any{{
+				"id": "M5", "name": "Actually a Movie", "facet": "MOVIE", "monitored": true,
+				"mediaFiles": []map[string]any{{"id": "f1"}},
+			}}}
+		}
+		t.Errorf("unexpected query (facet guard should have skipped): %.80s", q)
+		return nil
+	}
+	c, reqs := newCleanerFixture(t, testConfig(false),
+		jellyfinResponder(t, nil, []string{epOldWithFile()}, map[string]string{"js1": "337907"}), respond)
+	if err := c.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := mutationKinds(*reqs); len(got) != 0 {
+		t.Errorf("facet mismatch produced mutations: %v", got)
+	}
+}
+
+func TestAnimeSeriesStillProcessed(t *testing.T) {
+	// ANIME is a series-carrying facet in Scryer (MediaFacetValue enum:
+	// MOVIE/SERIES/ANIME); the facet guard must accept it or anime would
+	// silently never be cleaned.
+	respond := func(q string, vars map[string]any) any {
+		if strings.Contains(q, "titlesByExternalIds") {
+			return map[string]any{"titlesByExternalIds": []map[string]any{{
+				"id": "S1", "name": "9-1-1", "facet": "ANIME", "monitored": true, "mediaFiles": []any{},
+			}}}
+		}
+		return seriesScryerRespond(t)(q, vars)
+	}
+	c, reqs := newCleanerFixture(t, testConfig(false),
+		jellyfinResponder(t, nil, []string{epFresh(), epOldWithFile(), epOldNoFile()},
+			map[string]string{"js1": "337907"}), respond)
+	if err := c.Run(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got := mutationKinds(*reqs)
+	want := []string{"unmonE:E1", "unmonE:E2", "unmonE:E3", "delEps:S1:E2"}
+	if !equalStrings(got, want) {
+		t.Errorf("mutations = %v, want %v", got, want)
+	}
+}
+
+// captureLogs swaps the default slog logger for a buffer while fn runs.
+func captureLogs(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	fn()
+	return buf.String()
+}
+
+func TestDryRunLogsDoNotClaimActions(t *testing.T) {
+	// Dry-run logs are the go/no-go evidence for enabling real deletions;
+	// they must never claim an action that was not performed.
+	c, _ := newCleanerFixture(t, testConfig(true),
+		jellyfinResponder(t, []string{watchedMovieOld()},
+			[]string{epFresh(), epOldWithFile(), epOldNoFile()},
+			map[string]string{"js1": "337907"}),
+		seriesScryerRespond(t))
+	logs := captureLogs(t, func() {
+		if err := c.Run(); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	})
+	for _, phrase := range []string{"unmonitored movies", "unmonitored episodes", "deleted episode files", "deleted movie"} {
+		if strings.Contains(logs, phrase) {
+			t.Errorf("dry-run log claims action: %q", phrase)
+		}
+	}
+	if !strings.Contains(logs, "[dry-run]") {
+		t.Errorf("dry-run log missing [dry-run] lines:\n%s", logs)
 	}
 }

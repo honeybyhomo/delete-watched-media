@@ -72,6 +72,13 @@ func (c *Cleaner) processMovies(uid string) error {
 			slog.Debug("movie not in Scryer, skipping", "name", it.Name)
 			continue
 		}
+		// TMDB movie and TV number spaces are independent; only ever act on
+		// a title whose facet says this really is a movie.
+		if m.Facet != "MOVIE" {
+			slog.Warn("scryer lookup returned non-movie facet, skipping",
+				"name", it.Name, "scryer_title", m.Name, "facet", m.Facet)
+			continue
+		}
 		if c.cfg.UnmonitorOnWatch && m.Monitored {
 			unmonitor = append(unmonitor, pendingMovie{id: m.ID, title: it.Name})
 		}
@@ -80,6 +87,7 @@ func (c *Cleaner) processMovies(uid string) error {
 		}
 	}
 
+	unmonitored := 0
 	for _, m := range unmonitor {
 		if c.cfg.DryRun {
 			slog.Info("[dry-run] would unmonitor movie", "title", m.title)
@@ -87,10 +95,16 @@ func (c *Cleaner) processMovies(uid string) error {
 		}
 		if err := c.scryer.SetTitleMonitored(m.id, false); err != nil {
 			slog.Error("unmonitor movie failed", "title", m.title, "error", err)
+		} else {
+			unmonitored++
 		}
 	}
-	if len(unmonitor) > 0 {
-		slog.Info("unmonitored movies", "count", len(unmonitor))
+	if c.cfg.DryRun {
+		if len(unmonitor) > 0 {
+			slog.Info("[dry-run] unmonitor pending movies", "count", len(unmonitor))
+		}
+	} else if unmonitored > 0 {
+		slog.Info("unmonitored movies", "count", unmonitored)
 	}
 
 	for _, d := range deletes {
@@ -152,6 +166,13 @@ func (c *Cleaner) processEpisodes(uid string) error {
 			slog.Debug("series not in Scryer, skipping", "tvdb", tvdb)
 			continue
 		}
+		// Guard the collision direction: a TVDB lookup that lands on a
+		// MOVIE-faceted title must never enter the episode pipeline.
+		if !isSeriesFacet(ss.Facet) {
+			slog.Warn("scryer lookup returned non-series facet, skipping",
+				"tvdb", tvdb, "scryer_title", ss.Name, "facet", ss.Facet)
+			continue
+		}
 		detail, err := c.scryer.SeriesEpisodes(ss.ID)
 		if err != nil {
 			slog.Error("scryer episodes fetch failed", "series", ss.Name, "error", err)
@@ -193,6 +214,7 @@ func (c *Cleaner) processEpisodes(uid string) error {
 			}
 		}
 
+		unmonitored := 0
 		for _, e := range unmonitor {
 			if c.cfg.DryRun {
 				slog.Info("[dry-run] would unmonitor episode", "episode", e.label)
@@ -200,10 +222,16 @@ func (c *Cleaner) processEpisodes(uid string) error {
 			}
 			if err := c.scryer.SetEpisodeMonitored(e.id, false); err != nil {
 				slog.Error("unmonitor episode failed", "episode", e.label, "error", err)
+			} else {
+				unmonitored++
 			}
 		}
-		if len(unmonitor) > 0 {
-			slog.Info("unmonitored episodes", "series", ss.Name, "count", len(unmonitor))
+		if c.cfg.DryRun {
+			if len(unmonitor) > 0 {
+				slog.Info("[dry-run] unmonitor pending episodes", "series", ss.Name, "count", len(unmonitor))
+			}
+		} else if unmonitored > 0 {
+			slog.Info("unmonitored episodes", "series", ss.Name, "count", unmonitored)
 		}
 
 		if len(deletes) == 0 {
@@ -229,6 +257,13 @@ func (c *Cleaner) processEpisodes(uid string) error {
 		}
 	}
 	return nil
+}
+
+// isSeriesFacet reports whether a Scryer facet carries episodes. Scryer's
+// MediaFacetValue enum is MOVIE | SERIES | ANIME; anime titles are episode
+// carriers just like series.
+func isSeriesFacet(facet string) bool {
+	return facet == "SERIES" || facet == "ANIME"
 }
 
 func providerID(ids map[string]string, key string) string {

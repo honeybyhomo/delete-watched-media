@@ -328,6 +328,59 @@ func TestDeleteEpisodeFilesEmptyInput(t *testing.T) {
 	}
 }
 
+func TestDeleteEpisodeFilesReportsPartialFailure(t *testing.T) {
+	// A batch delete can succeed for some files and fail for others
+	// (HTTP 200, no errors[]): that must surface as an error, not be
+	// logged as a successful delete of all files.
+	srv, reqs := fakeGraphQL(t, func(q string) any {
+		switch {
+		case strings.Contains(q, "deleteEpisodeFilesPreview"):
+			return map[string]any{"data": map[string]any{"deleteEpisodeFilesPreview": map[string]any{
+				"preview": map[string]any{"fingerprint": "fp-p", "requiresTypedConfirmation": false,
+					"totalFileCount": 3, "targetLabel": "3 files"},
+				"fileCount": 3, "failedCount": 0}}}
+		case strings.Contains(q, "deleteEpisodeFiles("):
+			return map[string]any{"data": map[string]any{"deleteEpisodeFiles": map[string]any{"fileCount": 1, "failedCount": 2}}}
+		}
+		t.Errorf("unexpected query: %s", q)
+		return nil
+	})
+	c := NewScryerClient(srv.URL, "k")
+	n, err := c.DeleteEpisodeFiles("T1", []string{"E1", "E2", "E3"})
+	if err == nil || !strings.Contains(err.Error(), "failed") || !strings.Contains(err.Error(), "2") {
+		t.Fatalf("expected partial-failure error naming 2 failed files, got n=%d err=%v", n, err)
+	}
+	if len(*reqs) != 2 {
+		t.Fatalf("expected preview+mutation, got %d requests", len(*reqs))
+	}
+}
+
+func TestDeleteEpisodeFilesReturnsMutationFileCount(t *testing.T) {
+	// The success count comes from the mutation's own fileCount (what was
+	// actually deleted), not the preview's projection.
+	srv, _ := fakeGraphQL(t, func(q string) any {
+		switch {
+		case strings.Contains(q, "deleteEpisodeFilesPreview"):
+			return map[string]any{"data": map[string]any{"deleteEpisodeFilesPreview": map[string]any{
+				"preview": map[string]any{"fingerprint": "fp-m", "requiresTypedConfirmation": false,
+					"totalFileCount": 2, "targetLabel": "2 files"},
+				"fileCount": 2, "failedCount": 0}}}
+		case strings.Contains(q, "deleteEpisodeFiles("):
+			return map[string]any{"data": map[string]any{"deleteEpisodeFiles": map[string]any{"fileCount": 5, "failedCount": 0}}}
+		}
+		t.Errorf("unexpected query: %s", q)
+		return nil
+	})
+	c := NewScryerClient(srv.URL, "k")
+	n, err := c.DeleteEpisodeFiles("T1", []string{"E1"})
+	if err != nil {
+		t.Fatalf("DeleteEpisodeFiles: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("fileCount = %d, want 5 (mutation's actual count, not preview's 2)", n)
+	}
+}
+
 func TestSeriesEpisodesFlattensCollections(t *testing.T) {
 	srv, reqs := fakeGraphQL(t, func(q string) any {
 		if strings.Contains(q, "collections") {

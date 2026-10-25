@@ -135,7 +135,9 @@ func (j *JellyfinClient) SeriesTVDBIDs(seriesIDs []string) (map[string]string, e
 			return nil, err
 		}
 		for _, s := range resp.Items {
-			if tvdb, ok := s.ProviderIDs["Tvdb"]; ok && tvdb != "" {
+			// ProviderIds key capitalisation drifts across Jellyfin
+			// versions; match case-insensitively like providerID does.
+			if tvdb := providerID(s.ProviderIDs, "Tvdb"); tvdb != "" {
 				out[s.ID] = tvdb
 			}
 		}
