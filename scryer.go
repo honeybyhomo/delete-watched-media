@@ -177,3 +177,136 @@ func (s *ScryerClient) SeriesEpisodes(titleID string) (*scSeries, error) {
 	}
 	return out, nil
 }
+
+// SetEpisodeMonitored flips an episode's monitored flag (idempotent).
+func (s *ScryerClient) SetEpisodeMonitored(episodeID string, monitored bool) error {
+	const q = `mutation($input: SetEpisodeMonitoredInput!) {
+		setEpisodeMonitored(input: $input) { id monitored }
+	}`
+	var resp struct {
+		SetEpisodeMonitored struct {
+			ID        string `json:"id"`
+			Monitored bool   `json:"monitored"`
+		} `json:"setEpisodeMonitored"`
+	}
+	if err := s.gql(q, map[string]any{"input": map[string]any{
+		"episodeId": episodeID, "monitored": monitored,
+	}}, &resp); err != nil {
+		return fmt.Errorf("set episode monitored %s=%v: %w", episodeID, monitored, err)
+	}
+	return nil
+}
+
+// SetTitleMonitored flips a title's (movie's) monitored flag (idempotent).
+func (s *ScryerClient) SetTitleMonitored(titleID string, monitored bool) error {
+	const q = `mutation($input: SetTitleMonitoredInput!) {
+		setTitleMonitored(input: $input) { id monitored }
+	}`
+	var resp struct {
+		SetTitleMonitored struct {
+			ID        string `json:"id"`
+			Monitored bool   `json:"monitored"`
+		} `json:"setTitleMonitored"`
+	}
+	if err := s.gql(q, map[string]any{"input": map[string]any{
+		"titleId": titleID, "monitored": monitored,
+	}}, &resp); err != nil {
+		return fmt.Errorf("set title monitored %s=%v: %w", titleID, monitored, err)
+	}
+	return nil
+}
+
+// scDeletePreview is the shared preview-fingerprint envelope.
+type scDeletePreview struct {
+	Fingerprint          string `json:"fingerprint"`
+	RequiresTypedConfirm bool   `json:"requiresTypedConfirmation"`
+	TotalFileCount       int    `json:"totalFileCount"`
+	TargetLabel          string `json:"targetLabel"`
+}
+
+// refuseIfTypedConfirmation guards destructive calls: if Scryer demands a typed
+// confirmation for this delete, refuse it rather than bypass the guard.
+func refuseIfTypedConfirmation(p scDeletePreview) error {
+	if p.RequiresTypedConfirm {
+		return fmt.Errorf("scryer requires typed confirmation for %q — refusing to delete automatically", p.TargetLabel)
+	}
+	return nil
+}
+
+// DeleteEpisodeFiles deletes the given episodes' files from disk (one
+// preview+fingerprinted mutation). Returns the previewed file count.
+func (s *ScryerClient) DeleteEpisodeFiles(titleID string, episodeIDs []string) (int, error) {
+	if len(episodeIDs) == 0 {
+		return 0, nil
+	}
+	const previewQ = `query($input: DeleteEpisodeFilesPreviewInput!) {
+		deleteEpisodeFilesPreview(input: $input) {
+			preview { fingerprint requiresTypedConfirmation totalFileCount targetLabel }
+			fileCount failedCount
+		}
+	}`
+	var preview struct {
+		DeleteEpisodeFilesPreview struct {
+			Preview scDeletePreview `json:"preview"`
+		} `json:"deleteEpisodeFilesPreview"`
+	}
+	if err := s.gql(previewQ, map[string]any{"input": map[string]any{
+		"titleId": titleID, "episodeIds": episodeIDs,
+	}}, &preview); err != nil {
+		return 0, fmt.Errorf("preview episode files %s: %w", titleID, err)
+	}
+	p := preview.DeleteEpisodeFilesPreview.Preview
+	if err := refuseIfTypedConfirmation(p); err != nil {
+		return 0, err
+	}
+	const mutQ = `mutation($input: DeleteEpisodeFilesInput!) {
+		deleteEpisodeFiles(input: $input) { fileCount failedCount }
+	}`
+	var out struct {
+		DeleteEpisodeFiles struct {
+			FileCount   int `json:"fileCount"`
+			FailedCount int `json:"failedCount"`
+		} `json:"deleteEpisodeFiles"`
+	}
+	if err := s.gql(mutQ, map[string]any{"input": map[string]any{
+		"titleId": titleID, "episodeIds": episodeIDs,
+		"deleteFromDisk": true, "previewFingerprint": p.Fingerprint,
+	}}, &out); err != nil {
+		return 0, fmt.Errorf("delete episode files %s: %w", titleID, err)
+	}
+	return p.TotalFileCount, nil
+}
+
+// DeleteTitle removes the title and its files from disk (preview+fingerprinted).
+// Returns the previewed file count.
+func (s *ScryerClient) DeleteTitle(titleID string) (int, error) {
+	const previewQ = `query($id: ID!) {
+		deleteTitlePreview(titleId: $id) {
+			fingerprint requiresTypedConfirmation totalFileCount targetLabel
+		}
+	}`
+	var preview struct {
+		DeleteTitlePreview scDeletePreview `json:"deleteTitlePreview"`
+	}
+	if err := s.gql(previewQ, map[string]any{"id": titleID}, &preview); err != nil {
+		return 0, fmt.Errorf("preview title %s: %w", titleID, err)
+	}
+	p := preview.DeleteTitlePreview
+	if err := refuseIfTypedConfirmation(p); err != nil {
+		return 0, err
+	}
+	const mutQ = `mutation($input: DeleteTitleInput!) {
+		deleteTitle(input: $input) { fingerprint }
+	}`
+	var out struct {
+		DeleteTitle struct {
+			Fingerprint string `json:"fingerprint"`
+		} `json:"deleteTitle"`
+	}
+	if err := s.gql(mutQ, map[string]any{"input": map[string]any{
+		"titleId": titleID, "deleteFilesOnDisk": true, "previewFingerprint": p.Fingerprint,
+	}}, &out); err != nil {
+		return 0, fmt.Errorf("delete title %s: %w", titleID, err)
+	}
+	return p.TotalFileCount, nil
+}

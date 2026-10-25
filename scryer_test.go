@@ -121,6 +121,182 @@ func TestTitleByExternalIDNotFound(t *testing.T) {
 	}
 }
 
+func TestSetEpisodeMonitoredSendsInput(t *testing.T) {
+	srv, reqs := fakeGraphQL(t, func(q string) any {
+		if strings.Contains(q, "setEpisodeMonitored") {
+			return map[string]any{"data": map[string]any{"setEpisodeMonitored": map[string]any{"id": "E1", "monitored": false}}}
+		}
+		t.Errorf("unexpected query: %s", q)
+		return nil
+	})
+	c := NewScryerClient(srv.URL, "k")
+	if err := c.SetEpisodeMonitored("E1", false); err != nil {
+		t.Fatalf("SetEpisodeMonitored: %v", err)
+	}
+	vars := (*reqs)[0].Variables
+	input, _ := vars["input"].(map[string]any)
+	if input["episodeId"] != "E1" || input["monitored"] != false {
+		t.Errorf("input = %v", input)
+	}
+}
+
+func TestSetTitleMonitoredSendsInput(t *testing.T) {
+	srv, reqs := fakeGraphQL(t, func(q string) any {
+		if strings.Contains(q, "setTitleMonitored") {
+			return map[string]any{"data": map[string]any{"setTitleMonitored": map[string]any{"id": "T1", "monitored": false}}}
+		}
+		t.Errorf("unexpected query: %s", q)
+		return nil
+	})
+	c := NewScryerClient(srv.URL, "k")
+	if err := c.SetTitleMonitored("T1", false); err != nil {
+		t.Fatalf("SetTitleMonitored: %v", err)
+	}
+	input, _ := (*reqs)[0].Variables["input"].(map[string]any)
+	if input["titleId"] != "T1" || input["monitored"] != false {
+		t.Errorf("input = %v", input)
+	}
+}
+
+// deleteRecorder answers previews and mutations, tracking them separately.
+type deleteRecorder struct {
+	mutations []map[string]any
+}
+
+func (d *deleteRecorder) handler(t *testing.T, previewFingerprint string, requiresTyped bool, fileCount int) func(string) any {
+	return func(q string) any {
+		switch {
+		case strings.Contains(q, "deleteEpisodeFilesPreview"):
+			return map[string]any{"data": map[string]any{"deleteEpisodeFilesPreview": map[string]any{
+				"preview": map[string]any{
+					"fingerprint": previewFingerprint, "requiresTypedConfirmation": requiresTyped,
+					"totalFileCount": fileCount, "targetLabel": "2 selected episode files",
+				},
+				"fileCount": fileCount, "failedCount": 0,
+			}}}
+		case strings.Contains(q, "deleteEpisodeFiles(") || strings.Contains(q, "deleteEpisodeFiles("):
+			return map[string]any{"data": map[string]any{"deleteEpisodeFiles": map[string]any{"fileCount": fileCount, "failedCount": 0}}}
+		case strings.Contains(q, "deleteTitlePreview"):
+			return map[string]any{"data": map[string]any{"deleteTitlePreview": map[string]any{
+				"fingerprint": previewFingerprint, "requiresTypedConfirmation": requiresTyped,
+				"totalFileCount": fileCount, "targetLabel": "1 file",
+			}}}
+		case strings.Contains(q, "deleteTitle("):
+			return map[string]any{"data": map[string]any{"deleteTitle": map[string]any{"fingerprint": "ok"}}}
+		}
+		t.Errorf("unexpected query: %s", q)
+		return nil
+	}
+}
+
+func TestDeleteEpisodeFilesHandshake(t *testing.T) {
+	rec := &deleteRecorder{}
+	srv, reqs := fakeGraphQL(t, func(q string) any {
+		if strings.Contains(q, "deleteEpisodeFiles") && strings.Contains(q, "mutation") {
+			var m map[string]any
+			// record the mutation variables via closure trick: parse again below
+			_ = m
+			rec.mutations = append(rec.mutations, map[string]any{"q": q})
+		}
+		return rec.handler(t, "fp-123", false, 3)(q)
+	})
+	c := NewScryerClient(srv.URL, "k")
+	n, err := c.DeleteEpisodeFiles("T1", []string{"E1", "E2"})
+	if err != nil {
+		t.Fatalf("DeleteEpisodeFiles: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("fileCount = %d, want 3", n)
+	}
+	if len(*reqs) != 2 {
+		t.Fatalf("expected preview+mutation, got %d requests", len(*reqs))
+	}
+	preview, mut := (*reqs)[0], (*reqs)[1]
+	if !strings.Contains(preview.Query, "deleteEpisodeFilesPreview") {
+		t.Errorf("first call not preview: %s", preview.Query)
+	}
+	pin, _ := preview.Variables["input"].(map[string]any)
+	if pin["titleId"] != "T1" {
+		t.Errorf("preview input = %v", pin)
+	}
+	if ids, ok := pin["episodeIds"].([]any); !ok || len(ids) != 2 || ids[0] != "E1" {
+		t.Errorf("preview episodeIds = %v", pin["episodeIds"])
+	}
+	min, _ := mut.Variables["input"].(map[string]any)
+	if min["titleId"] != "T1" || min["previewFingerprint"] != "fp-123" || min["deleteFromDisk"] != true {
+		t.Errorf("mutation input = %v", min)
+	}
+	if ids, ok := min["episodeIds"].([]any); !ok || len(ids) != 2 {
+		t.Errorf("mutation episodeIds = %v", min["episodeIds"])
+	}
+}
+
+func TestDeleteRefusesTypedConfirmation(t *testing.T) {
+	rec := &deleteRecorder{}
+	srv, reqs := fakeGraphQL(t, func(q string) any {
+		if strings.Contains(q, "mutation") {
+			rec.mutations = append(rec.mutations, map[string]any{"q": q})
+		}
+		return rec.handler(t, "fp-x", true, 5)(q)
+	})
+	c := NewScryerClient(srv.URL, "k")
+	if _, err := c.DeleteEpisodeFiles("T1", []string{"E1"}); err == nil {
+		t.Fatal("expected typed-confirmation refusal error")
+	} else if !strings.Contains(err.Error(), "typed confirmation") {
+		t.Errorf("error = %v", err)
+	}
+	if _, err := c.DeleteTitle("T1"); err == nil {
+		t.Fatal("expected typed-confirmation refusal error for title")
+	}
+	for _, r := range *reqs {
+		if strings.Contains(r.Query, "mutation") {
+			t.Errorf("mutation reached server despite typed confirmation: %s", r.Query)
+		}
+	}
+}
+
+func TestDeleteTitleHandshake(t *testing.T) {
+	rec := &deleteRecorder{}
+	srv, reqs := fakeGraphQL(t, func(q string) any {
+		if strings.Contains(q, "mutation") {
+			rec.mutations = append(rec.mutations, map[string]any{"q": q})
+		}
+		return rec.handler(t, "fp-t", false, 4)(q)
+	})
+	c := NewScryerClient(srv.URL, "k")
+	n, err := c.DeleteTitle("T1")
+	if err != nil {
+		t.Fatalf("DeleteTitle: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("fileCount = %d, want 4", n)
+	}
+	if len(*reqs) != 2 {
+		t.Fatalf("expected preview+mutation, got %d", len(*reqs))
+	}
+	if !strings.Contains((*reqs)[0].Query, "deleteTitlePreview") {
+		t.Errorf("first call not preview: %s", (*reqs)[0].Query)
+	}
+	min, _ := (*reqs)[1].Variables["input"].(map[string]any)
+	if min["titleId"] != "T1" || min["previewFingerprint"] != "fp-t" || min["deleteFilesOnDisk"] != true {
+		t.Errorf("mutation input = %v", min)
+	}
+}
+
+func TestDeleteEpisodeFilesEmptyInput(t *testing.T) {
+	srv, reqs := fakeGraphQL(t, func(q string) any {
+		t.Errorf("no requests expected, got: %s", q)
+		return nil
+	})
+	c := NewScryerClient(srv.URL, "k")
+	if _, err := c.DeleteEpisodeFiles("T1", nil); err != nil {
+		t.Fatalf("empty input: %v", err)
+	}
+	if len(*reqs) != 0 {
+		t.Errorf("expected 0 requests, got %d", len(*reqs))
+	}
+}
+
 func TestSeriesEpisodesFlattensCollections(t *testing.T) {
 	srv, reqs := fakeGraphQL(t, func(q string) any {
 		if strings.Contains(q, "collections") {
