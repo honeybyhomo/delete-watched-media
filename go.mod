@@ -1,4 +1,4 @@
-module github.com/honeybyhomo/deletewatchedarr
+module github.com/honeybyhomo/delete-watched-media
 
 go 1.26
 

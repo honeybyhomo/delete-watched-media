@@ -132,7 +132,9 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-func daysAgoString(n int) string { return time.Now().Add(-time.Duration(n) * 24 * time.Hour).Format(time.RFC3339) }
+func daysAgoString(n int) string {
+	return time.Now().Add(-time.Duration(n) * 24 * time.Hour).Format(time.RFC3339)
+}
 
 func movieItem(name, tmdb, when string) string {
 	return `{"Name":"` + name + `","Id":"jm1","Type":"Movie","ProviderIds":{"Tmdb":"` + tmdb + `"},"UserData":{"Played":true,"LastPlayedDate":"` + when + `"}}`

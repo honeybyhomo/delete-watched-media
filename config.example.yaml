@@ -1,24 +1,21 @@
-# deletewatchedarr — example configuration.
+# delete-watched-media — example configuration.
 # Copy to config.yaml, fill in your URLs + Jellyfin username, and provide the
-# three API keys via environment variables (see README). This file contains NO
+# two API keys via environment variables (see README). This file contains NO
 # secrets and is safe to commit / share.
 
 jellyfin:
   url: http://jellyfin:8096
   username: admin # Jellyfin user whose watch history drives deletion
 
-sonarr:
-  url: http://sonarr:8989
-
-radarr:
-  url: http://radarr:7878
+scryer:
+  url: http://scryer:8080
 
 # How many days ago an item must have been watched before its file is deleted.
 # 0 = delete on the next poll after it's watched.
 movie_retention_days: 2
 episode_retention_days: 1
 
-# Unmonitor in Sonarr/Radarr the moment an item is watched — stops re-downloads
+# Unmonitor in Scryer the moment an item is watched — stops re-downloads
 # and upgrades while the file is still kept during the retention window.
 unmonitor_on_watch: true
 

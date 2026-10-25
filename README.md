@@ -1,27 +1,29 @@
-# deletewatchedarr
+# delete-watched-media
 
-Automatically deletes media you've already watched from **Jellyfin**, via **Sonarr** and **Radarr** — at **episode** and **movie** granularity.
+Automatically deletes media you've already watched from **Jellyfin**, via **[Scryer](https://www.scryer.media/scryer/)** — at **episode** and **movie** granularity.
 
-> Polls Jellyfin for watched items → unmonitors them in Sonarr/Radarr immediately → deletes their files after a configurable number of days.
+> Polls Jellyfin for watched items → unmonitors them in Scryer immediately → deletes their files after a configurable number of days.
 
-Most "media cleanup" tools either delete whole shows only, require Plex + Tautulli, or are heavyweight rule-engine apps. `deletewatchedarr` is the boring thing a lot of people actually want: **"I watched it; get it off my disk, but keep the show tracked so it doesn't re-download."**
+Formerly `deletewatchedarr` (Jellyfin + Sonarr/Radarr). The logic is unchanged from v0.1; only the backend changed when the server moved from Sonarr/Radarr to Scryer. Repo and image were renamed accordingly — old `ghcr.io/honeybyhomo/deletewatchedarr` tags stay, new builds publish under the new name.
+
+Most "media cleanup" tools either delete whole shows only, require Plex + Tautulli, or are heavyweight rule-engine apps. `delete-watched-media` is the boring thing a lot of people actually want: **"I watched it; get it off my disk, but keep the show tracked so it doesn't re-download."**
 
 ## What it does
 
 On each poll (default every 60 minutes), for the configured Jellyfin user:
 
 **Movies**
-- *On watch* → unmonitor in Radarr (no more upgrade searches)
-- *After `movie_retention_days`* → delete the file **and** remove the movie from Radarr
+- *On watch* → unmonitor in Scryer (no more upgrade searches)
+- *After `movie_retention_days`* → delete the file **and** remove the title from Scryer
 
 **Episodes**
-- *On watch* → unmonitor that episode in Sonarr
+- *On watch* → unmonitor that episode in Scryer
 - *After `episode_retention_days`* → delete the episode file from disk
-- The **series and season stay in Sonarr** (unmonitored) — whole-show cleanup is left to you, since that's rare
+- The **series and season stay in Scryer** (unmonitored) — whole-show cleanup is left to you, since that's rare
 
 Deletions are **idempotent**: items already without a file (or already removed) are skipped, so re-polling is a no-op and there's no database/state file to manage.
 
-It deletes through the Sonarr/Radarr APIs, so it works with **any** downloader (Usenet/SABnzbd, qBittorrent, Deluge, …) — it does not touch your download client.
+It deletes through Scryer's GraphQL API (preview-fingerprinted mutations — Scryer itself refuses deletes that would demand a typed confirmation), so it works with **any** downloader (Usenet/Weaver/SABnzbd, qBittorrent, …) — it does not touch your download client. No Jellyfin refresh is needed either: Jellyfin's realtime library monitor picks up the deletions, and Scryer's media-server connection pushes refreshes.
 
 ## Configuration
 
@@ -33,10 +35,8 @@ Settings live in a `config.yaml` (no secrets → safe to commit/share). API keys
 jellyfin:
   url: http://jellyfin:8096
   username: admin
-sonarr:
-  url: http://sonarr:8989
-radarr:
-  url: http://radarr:7878
+scryer:
+  url: http://scryer:8080
 movie_retention_days: 2
 episode_retention_days: 1
 unmonitor_on_watch: true
@@ -50,44 +50,41 @@ Environment variables (secrets):
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `JELLYFIN_API_KEY` | yes | Jellyfin API key (Dashboard → API Keys) |
-| `SONARR_API_KEY` | yes | Sonarr API key (Settings → General) |
-| `RADARR_API_KEY` | yes | Radarr API key (Settings → General) |
+| `SCRYER_API_KEY` | yes | Scryer API key (Settings → Security → API Keys; keys inherit your user's permissions) |
 
 ## Run with Docker
 
 ```bash
 docker run -d \
-  --name deletewatchedarr \
+  --name delete-watched-media \
   -v ./config.yaml:/config.yaml:ro \
   -e JELLYFIN_API_KEY=... \
-  -e SONARR_API_KEY=... \
-  -e RADARR_API_KEY=... \
+  -e SCRYER_API_KEY=... \
   --restart unless-stopped \
-  ghcr.io/honeybyhomo/deletewatchedarr:latest
+  ghcr.io/honeybyhomo/delete-watched-media:latest
 ```
 
 Or with Docker Compose:
 
 ```yaml
 services:
-  deletewatchedarr:
-    image: ghcr.io/honeybyhomo/deletewatchedarr:latest
-    container_name: deletewatchedarr
+  delete-watched-media:
+    image: ghcr.io/honeybyhomo/delete-watched-media:latest
+    container_name: delete-watched-media
     environment:
       - JELLYFIN_API_KEY=...
-      - SONARR_API_KEY=...
-      - RADARR_API_KEY=...
+      - SCRYER_API_KEY=...
     volumes:
       - ./config.yaml:/config.yaml:ro
     restart: unless-stopped
 ```
 
-Put the container on the same Docker network(s) as your Jellyfin/Sonarr/Radarr containers so the `url:` hostnames resolve.
+Put the container on the same Docker network as your Jellyfin/Scryer containers so the `url:` hostnames resolve.
 
 ## Safety
 
 - **Start with `dry_run: true`.** It logs every unmonitor and deletion it *would* perform, changing nothing. Flip to `false` once the plan looks right.
-- Everything is reversible-ish: Sonarr/Radarr have a recycle bin (enable it for a safety net); unmonitoring is trivially undone.
+- Every deletion runs Scryer's preview query first and passes its fingerprint; if Scryer would require a typed confirmation for a delete, the tool refuses rather than bypassing the guard.
 - The tool only ever acts on items **marked watched** for the configured Jellyfin user — never on unwatched media.
 
 ## Why not …?
@@ -98,7 +95,8 @@ Put the container on the same Docker network(s) as your Jellyfin/Sonarr/Radarr c
 | Deleterr | Requires Plex + Tautulli |
 | Maintainerr | Capable but a heavyweight rule-engine + DB + web UI |
 | OCDarr | Heavyweight beta app |
-| Erasarr / Eyebleacharr | Feature-similar but very new / unmaintained |
+| Scryer maintenance rules | Scryer's own rule engine has the right *actions* (unmonitor/delete-files) but can't match on Jellyfin watch state — no watched/last-played data reaches its matchers |
+| Jellyfin plugins (Media Cleaner etc.) | Delete files but don't unmonitor/remove in the media manager, so library entries re-download |
 
 ## Development
 

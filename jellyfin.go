@@ -85,8 +85,8 @@ type jfItem struct {
 }
 
 type jfItemsResp struct {
-	Items          []jfItem `json:"Items"`
-	TotalRecordCount int    `json:"TotalRecordCount"`
+	Items            []jfItem `json:"Items"`
+	TotalRecordCount int      `json:"TotalRecordCount"`
 }
 
 // WatchedItems returns watched items of the given types (e.g. "Movie", "Episode")
@@ -118,7 +118,7 @@ func (j *JellyfinClient) WatchedItems(userID string, includeTypes []string) ([]j
 }
 
 // SeriesTVDBIDs maps each Jellyfin series id to its TVDB id (needed to look the
-// series up in Sonarr).
+// series up in Scryer).
 func (j *JellyfinClient) SeriesTVDBIDs(seriesIDs []string) (map[string]string, error) {
 	out := map[string]string{}
 	const batch = 50
