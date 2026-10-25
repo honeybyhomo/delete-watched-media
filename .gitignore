@@ -12,3 +12,6 @@ config.local.yaml
 *.swp
 .idea/
 .vscode/
+
+# Worktrees
+/.worktrees/
