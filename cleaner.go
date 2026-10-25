@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -10,16 +11,14 @@ import (
 type Cleaner struct {
 	cfg      *Config
 	jellyfin *JellyfinClient
-	sonarr   *SonarrClient
-	radarr   *RadarrClient
+	scryer   *ScryerClient
 }
 
-func NewCleaner(cfg *Config, jellyfinKey, sonarrKey, radarrKey string) (*Cleaner, error) {
+func NewCleaner(cfg *Config, jellyfinKey, scryerKey string) (*Cleaner, error) {
 	return &Cleaner{
 		cfg:      cfg,
 		jellyfin: NewJellyfinClient(cfg.Jellyfin.URL, jellyfinKey),
-		sonarr:   NewSonarrClient(cfg.Sonarr.URL, sonarrKey),
-		radarr:   NewRadarrClient(cfg.Radarr.URL, radarrKey),
+		scryer:   NewScryerClient(cfg.Scryer.URL, scryerKey),
 	}, nil
 }
 
@@ -51,11 +50,11 @@ func (c *Cleaner) processMovies(uid string) error {
 	}
 	cutoff := time.Now().Add(-time.Duration(c.cfg.MovieRetentionDays) * 24 * time.Hour)
 
-	var unmonitorIDs []int64
 	type pendingDelete struct {
-		id    int64
+		id    string
 		title string
 	}
+	var unmonitorIDs []string
 	var deletes []pendingDelete
 
 	for _, it := range items {
@@ -64,42 +63,44 @@ func (c *Cleaner) processMovies(uid string) error {
 			slog.Debug("movie has no Tmdb id, skipping", "name", it.Name)
 			continue
 		}
-		m, err := c.radarr.MovieByTMDB(tmdb)
+		m, err := c.scryer.TitleByExternalID("TMDB", tmdb)
 		if err != nil {
-			slog.Error("radarr lookup failed", "name", it.Name, "error", err)
+			slog.Error("scryer lookup failed", "name", it.Name, "error", err)
 			continue
 		}
 		if m == nil {
-			slog.Debug("movie not in Radarr, skipping", "name", it.Name)
+			slog.Debug("movie not in Scryer, skipping", "name", it.Name)
 			continue
 		}
 		if c.cfg.UnmonitorOnWatch && m.Monitored {
 			unmonitorIDs = append(unmonitorIDs, m.ID)
 		}
-		if pastRetention(it.UserData, cutoff) {
+		if pastRetention(it.UserData, cutoff) && m.FileCount > 0 {
 			deletes = append(deletes, pendingDelete{id: m.ID, title: it.Name})
 		}
 	}
 
-	if c.cfg.UnmonitorOnWatch && len(unmonitorIDs) > 0 {
+	for _, id := range unmonitorIDs {
 		if c.cfg.DryRun {
-			slog.Info("[dry-run] would unmonitor movies", "count", len(unmonitorIDs))
-		} else if err := c.radarr.UnmonitorMovies(unmonitorIDs); err != nil {
-			slog.Error("unmonitor movies failed", "error", err)
-		} else {
-			slog.Info("unmonitored movies", "count", len(unmonitorIDs))
+			slog.Info("[dry-run] would unmonitor movie", "title_id", id)
+			continue
+		}
+		if err := c.scryer.SetTitleMonitored(id, false); err != nil {
+			slog.Error("unmonitor movie failed", "title_id", id, "error", err)
 		}
 	}
+	slog.Info("unmonitored movies", "count", len(unmonitorIDs))
 
 	for _, d := range deletes {
 		if c.cfg.DryRun {
-			slog.Info("[dry-run] would delete movie + file and remove from Radarr", "title", d.title)
+			slog.Info("[dry-run] would delete movie + files and remove from Scryer", "title", d.title)
 			continue
 		}
-		if err := c.radarr.DeleteMovie(d.id); err != nil {
+		n, err := c.scryer.DeleteTitle(d.id)
+		if err != nil {
 			slog.Error("delete movie failed", "title", d.title, "error", err)
 		} else {
-			slog.Info("deleted movie (file + Radarr entry)", "title", d.title)
+			slog.Info("deleted movie (files + Scryer entry)", "title", d.title, "files", n)
 		}
 	}
 	return nil
@@ -140,31 +141,35 @@ func (c *Cleaner) processEpisodes(uid string) error {
 			slog.Warn("series has no Tvdb id, skipping", "series_id", seriesID)
 			continue
 		}
-		ss, err := c.sonarr.SeriesByTVDB(tvdb)
+		ss, err := c.scryer.TitleByExternalID("TVDB", tvdb)
 		if err != nil {
-			slog.Error("sonarr series lookup failed", "tvdb", tvdb, "error", err)
+			slog.Error("scryer series lookup failed", "tvdb", tvdb, "error", err)
 			continue
 		}
 		if ss == nil {
-			slog.Debug("series not in Sonarr, skipping", "tvdb", tvdb)
+			slog.Debug("series not in Scryer, skipping", "tvdb", tvdb)
 			continue
 		}
-		sonarrEps, err := c.sonarr.EpisodesBySeries(ss.ID)
+		detail, err := c.scryer.SeriesEpisodes(ss.ID)
 		if err != nil {
-			slog.Error("sonarr episodes fetch failed", "series", ss.Title, "error", err)
+			slog.Error("scryer episodes fetch failed", "series", ss.Name, "error", err)
 			continue
 		}
-		idx := make(map[string]sonarrEpisode, len(sonarrEps))
-		for _, se := range sonarrEps {
-			idx[epKey(se.SeasonNumber, se.EpisodeNumber)] = se
+		idx := make(map[string]scEpisode, len(detail.Episodes))
+		for _, se := range detail.Episodes {
+			season, errS := strconv.Atoi(strings.TrimSpace(se.SeasonNumber))
+			episode, errE := strconv.Atoi(strings.TrimSpace(se.EpisodeNumber))
+			if errS != nil || errE != nil {
+				slog.Debug("scryer episode has unparseable numbers, skipping",
+					"series", ss.Name, "season", se.SeasonNumber, "episode", se.EpisodeNumber)
+				continue
+			}
+			idx[epKey(season, episode)] = se
 		}
 
-		var unmonitorIDs []int64
-		type pendingDelete struct {
-			fileID int64
-			label  string
-		}
-		var deletes []pendingDelete
+		var unmonitorIDs []string
+		var deleteIDs []string
+		var deleteLabels []string
 
 		for _, je := range watchedEps {
 			if je.ParentIndexNumber == nil || je.IndexNumber == nil {
@@ -174,36 +179,43 @@ func (c *Cleaner) processEpisodes(uid string) error {
 			if !ok {
 				continue
 			}
+			label := fmt.Sprintf("%s S%02dE%02d", ss.Name, *je.ParentIndexNumber, *je.IndexNumber)
 			if c.cfg.UnmonitorOnWatch && se.Monitored {
 				unmonitorIDs = append(unmonitorIDs, se.ID)
 			}
-			if pastRetention(je.UserData, cutoff) && se.EpisodeFileID != 0 {
-				deletes = append(deletes, pendingDelete{
-					fileID: se.EpisodeFileID,
-					label:  fmt.Sprintf("%s S%02dE%02d", ss.Title, se.SeasonNumber, se.EpisodeNumber),
-				})
+			if pastRetention(je.UserData, cutoff) && se.HasFile {
+				deleteIDs = append(deleteIDs, se.ID)
+				deleteLabels = append(deleteLabels, label)
 			}
 		}
 
-		if c.cfg.UnmonitorOnWatch && len(unmonitorIDs) > 0 {
+		for _, id := range unmonitorIDs {
 			if c.cfg.DryRun {
-				slog.Info("[dry-run] would unmonitor episodes", "series", ss.Title, "count", len(unmonitorIDs))
-			} else if err := c.sonarr.UnmonitorEpisodes(unmonitorIDs); err != nil {
-				slog.Error("unmonitor episodes failed", "series", ss.Title, "error", err)
-			} else {
-				slog.Info("unmonitored episodes", "series", ss.Title, "count", len(unmonitorIDs))
-			}
-		}
-		for _, d := range deletes {
-			if c.cfg.DryRun {
-				slog.Info("[dry-run] would delete episode file", "episode", d.label)
+				slog.Info("[dry-run] would unmonitor episode", "series", ss.Name, "episode_id", id)
 				continue
 			}
-			if err := c.sonarr.DeleteEpisodeFile(d.fileID); err != nil {
-				slog.Error("delete episode file failed", "episode", d.label, "error", err)
-			} else {
-				slog.Info("deleted episode file", "episode", d.label)
+			if err := c.scryer.SetEpisodeMonitored(id, false); err != nil {
+				slog.Error("unmonitor episode failed", "series", ss.Name, "episode_id", id, "error", err)
 			}
+		}
+		if len(unmonitorIDs) > 0 {
+			slog.Info("unmonitored episodes", "series", ss.Name, "count", len(unmonitorIDs))
+		}
+
+		if len(deleteIDs) == 0 {
+			continue
+		}
+		if c.cfg.DryRun {
+			for _, l := range deleteLabels {
+				slog.Info("[dry-run] would delete episode file", "episode", l)
+			}
+			continue
+		}
+		n, err := c.scryer.DeleteEpisodeFiles(ss.ID, deleteIDs)
+		if err != nil {
+			slog.Error("delete episode files failed", "series", ss.Name, "episodes", deleteLabels, "error", err)
+		} else {
+			slog.Info("deleted episode files", "series", ss.Name, "episodes", deleteLabels, "files", n)
 		}
 	}
 	return nil

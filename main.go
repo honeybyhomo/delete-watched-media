@@ -23,14 +23,13 @@ func main() {
 	slog.SetDefault(logger)
 
 	jellyfinKey := os.Getenv("JELLYFIN_API_KEY")
-	sonarrKey := os.Getenv("SONARR_API_KEY")
-	radarrKey := os.Getenv("RADARR_API_KEY")
-	if jellyfinKey == "" || sonarrKey == "" || radarrKey == "" {
-		slog.Error("missing required environment variable(s): JELLYFIN_API_KEY, SONARR_API_KEY, RADARR_API_KEY must all be set")
+	scryerKey := os.Getenv("SCRYER_API_KEY")
+	if jellyfinKey == "" || scryerKey == "" {
+		slog.Error("missing required environment variable(s): JELLYFIN_API_KEY, SCRYER_API_KEY must both be set")
 		os.Exit(1)
 	}
 
-	cleaner, err := NewCleaner(cfg, jellyfinKey, sonarrKey, radarrKey)
+	cleaner, err := NewCleaner(cfg, jellyfinKey, scryerKey)
 	if err != nil {
 		slog.Error("failed to initialize", "error", err)
 		os.Exit(1)

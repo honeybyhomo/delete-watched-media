@@ -8,12 +8,11 @@ import (
 )
 
 // Config holds all non-secret settings. API keys are read from the environment
-// (JELLYFIN_API_KEY, SONARR_API_KEY, RADARR_API_KEY) so this file can be safely
-// committed to git and shared.
+// (JELLYFIN_API_KEY, SCRYER_API_KEY) so this file can be safely committed to
+// git and shared.
 type Config struct {
 	Jellyfin             Service `yaml:"jellyfin"`
-	Sonarr               Service `yaml:"sonarr"`
-	Radarr               Service `yaml:"radarr"`
+	Scryer               Service `yaml:"scryer"`
 	MovieRetentionDays   int     `yaml:"movie_retention_days"`
 	EpisodeRetentionDays int     `yaml:"episode_retention_days"`
 	UnmonitorOnWatch     bool    `yaml:"unmonitor_on_watch"`
@@ -51,8 +50,8 @@ func LoadConfig(path string) (*Config, error) {
 	if c.EpisodeRetentionDays < 0 {
 		c.EpisodeRetentionDays = 0
 	}
-	if c.Jellyfin.URL == "" || c.Sonarr.URL == "" || c.Radarr.URL == "" {
-		return nil, fmt.Errorf("jellyfin/sonarr/radarr urls must all be set")
+	if c.Jellyfin.URL == "" || c.Scryer.URL == "" {
+		return nil, fmt.Errorf("jellyfin/scryer urls must both be set")
 	}
 	if c.Jellyfin.Username == "" {
 		return nil, fmt.Errorf("jellyfin.username must be set")
