@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -189,31 +190,59 @@ func TestSetTitleMonitoredSendsInput(t *testing.T) {
 	}
 }
 
+// fakeFileIDs returns n synthetic media-file ids ("f1".."fn").
+func fakeFileIDs(n int) []string {
+	ids := make([]string, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("f%d", i+1)
+	}
+	return ids
+}
+
 // deleteRecorder answers previews and mutations, tracking them separately.
+// Mutation shapes match Scryer's live schema (introspected 2026-10-28):
+// deleteEpisodeFiles returns acceptedFileIds (async job); deleteTitle
+// returns recycle-bin counts.
 type deleteRecorder struct {
 	mutations []map[string]any
 }
 
 func (d *deleteRecorder) handler(t *testing.T, previewFingerprint string, requiresTyped bool, fileCount int) func(string) any {
+	return d.handlerPartial(t, previewFingerprint, requiresTyped, fileCount, fileCount, 0, 0)
+}
+
+// handlerPartial lets tests vary the episode-accept count and the title
+// recycle counts independently of the preview.
+func (d *deleteRecorder) handlerPartial(t *testing.T, previewFingerprint string, requiresTyped bool, previewFileCount, acceptedCount, recycleBusy, recycleFailed int) func(string) any {
 	return func(q string) any {
 		switch {
 		case strings.Contains(q, "deleteEpisodeFilesPreview"):
 			return map[string]any{"data": map[string]any{"deleteEpisodeFilesPreview": map[string]any{
 				"preview": map[string]any{
 					"fingerprint": previewFingerprint, "requiresTypedConfirmation": requiresTyped,
-					"totalFileCount": fileCount, "targetLabel": "2 selected episode files",
+					"totalFileCount": previewFileCount, "targetLabel": "2 selected episode files",
 				},
-				"fileCount": fileCount, "failedCount": 0,
+				"fileCount": previewFileCount, "failedCount": 0,
 			}}}
-		case strings.Contains(q, "deleteEpisodeFiles(") || strings.Contains(q, "deleteEpisodeFiles("):
-			return map[string]any{"data": map[string]any{"deleteEpisodeFiles": map[string]any{"fileCount": fileCount, "failedCount": 0}}}
+		case strings.Contains(q, "deleteEpisodeFiles("):
+			return map[string]any{"data": map[string]any{"deleteEpisodeFiles": map[string]any{
+				"acceptedFileIds": fakeFileIDs(acceptedCount),
+			}}}
 		case strings.Contains(q, "deleteTitlePreview"):
 			return map[string]any{"data": map[string]any{"deleteTitlePreview": map[string]any{
 				"fingerprint": previewFingerprint, "requiresTypedConfirmation": requiresTyped,
-				"totalFileCount": fileCount, "targetLabel": "1 file",
+				"totalFileCount": previewFileCount, "targetLabel": "1 file",
 			}}}
 		case strings.Contains(q, "deleteTitle("):
-			return map[string]any{"data": map[string]any{"deleteTitle": map[string]any{"fingerprint": "ok"}}}
+			return map[string]any{"data": map[string]any{"deleteTitle": map[string]any{
+				"id": "T1",
+				// recycle: previewFileCount purged, nothing preserved,
+				// plus whatever busy/failed the test asked for.
+				"recyclePurged":    previewFileCount,
+				"recyclePreserved": 0,
+				"recycleBusy":      recycleBusy,
+				"recycleFailed":    recycleFailed,
+			}}}
 		}
 		t.Errorf("unexpected query: %s", q)
 		return nil
@@ -224,9 +253,6 @@ func TestDeleteEpisodeFilesHandshake(t *testing.T) {
 	rec := &deleteRecorder{}
 	srv, reqs := fakeGraphQL(t, func(q string) any {
 		if strings.Contains(q, "deleteEpisodeFiles") && strings.Contains(q, "mutation") {
-			var m map[string]any
-			// record the mutation variables via closure trick: parse again below
-			_ = m
 			rec.mutations = append(rec.mutations, map[string]any{"q": q})
 		}
 		return rec.handler(t, "fp-123", false, 3)(q)
@@ -237,7 +263,7 @@ func TestDeleteEpisodeFilesHandshake(t *testing.T) {
 		t.Fatalf("DeleteEpisodeFiles: %v", err)
 	}
 	if n != 3 {
-		t.Errorf("fileCount = %d, want 3", n)
+		t.Errorf("accepted file count = %d, want 3", n)
 	}
 	if len(*reqs) != 2 {
 		t.Fatalf("expected preview+mutation, got %d requests", len(*reqs))
@@ -252,6 +278,13 @@ func TestDeleteEpisodeFilesHandshake(t *testing.T) {
 	}
 	if ids, ok := pin["episodeIds"].([]any); !ok || len(ids) != 2 || ids[0] != "E1" {
 		t.Errorf("preview episodeIds = %v", pin["episodeIds"])
+	}
+	// The mutation must select the live schema's fields — the async job
+	// payload answers with acceptedFileIds, not sync counts (the v0.2.0
+	// selection of fileCount/failedCount failed validation on the real
+	// server and every delete was rejected).
+	if !strings.Contains(mut.Query, "acceptedFileIds") || strings.Contains(mut.Query, "fileCount") {
+		t.Errorf("mutation selects wrong fields: %s", mut.Query)
 	}
 	min, _ := mut.Variables["input"].(map[string]any)
 	if min["titleId"] != "T1" || min["previewFingerprint"] != "fp-123" || min["deleteFromDisk"] != true {
@@ -300,7 +333,7 @@ func TestDeleteTitleHandshake(t *testing.T) {
 		t.Fatalf("DeleteTitle: %v", err)
 	}
 	if n != 4 {
-		t.Errorf("fileCount = %d, want 4", n)
+		t.Errorf("removed files = %d, want 4", n)
 	}
 	if len(*reqs) != 2 {
 		t.Fatalf("expected preview+mutation, got %d", len(*reqs))
@@ -308,9 +341,31 @@ func TestDeleteTitleHandshake(t *testing.T) {
 	if !strings.Contains((*reqs)[0].Query, "deleteTitlePreview") {
 		t.Errorf("first call not preview: %s", (*reqs)[0].Query)
 	}
+	// The mutation must select the live schema's recycle-bin fields (the
+	// v0.2.0 selection of `fingerprint` failed validation on the real
+	// server and the delete was rejected).
+	mutQ := (*reqs)[1].Query
+	if !strings.Contains(mutQ, "recyclePurged") || strings.Contains(mutQ, "fingerprint") {
+		t.Errorf("mutation selects wrong fields: %s", mutQ)
+	}
 	min, _ := (*reqs)[1].Variables["input"].(map[string]any)
 	if min["titleId"] != "T1" || min["previewFingerprint"] != "fp-t" || min["deleteFilesOnDisk"] != true {
 		t.Errorf("mutation input = %v", min)
+	}
+}
+
+func TestDeleteTitleReportsRecycleProblems(t *testing.T) {
+	// Files that end up busy or failed in the recycle pipeline were not
+	// cleanly removed — surface as an error (files remain and are retried
+	// next cycle).
+	rec := &deleteRecorder{}
+	srv, _ := fakeGraphQL(t, func(q string) any {
+		return rec.handlerPartial(t, "fp-r", false, 2, 2, 1, 2)(q)
+	})
+	c := NewScryerClient(srv.URL, "k")
+	n, err := c.DeleteTitle("T1")
+	if err == nil || !strings.Contains(err.Error(), "busy=1") || !strings.Contains(err.Error(), "failed=2") {
+		t.Fatalf("expected recycle error naming busy=1 failed=2, got n=%d err=%v", n, err)
 	}
 }
 
@@ -328,48 +383,33 @@ func TestDeleteEpisodeFilesEmptyInput(t *testing.T) {
 	}
 }
 
-func TestDeleteEpisodeFilesReportsPartialFailure(t *testing.T) {
-	// A batch delete can succeed for some files and fail for others
-	// (HTTP 200, no errors[]): that must surface as an error, not be
-	// logged as a successful delete of all files.
+func TestDeleteEpisodeFilesReportsPartialAcceptance(t *testing.T) {
+	// The async job accepts file ids; if fewer files are accepted than the
+	// preview projected, some deletes did not happen — surface it (the
+	// affected files keep existing and are retried next cycle).
+	rec := &deleteRecorder{}
 	srv, reqs := fakeGraphQL(t, func(q string) any {
-		switch {
-		case strings.Contains(q, "deleteEpisodeFilesPreview"):
-			return map[string]any{"data": map[string]any{"deleteEpisodeFilesPreview": map[string]any{
-				"preview": map[string]any{"fingerprint": "fp-p", "requiresTypedConfirmation": false,
-					"totalFileCount": 3, "targetLabel": "3 files"},
-				"fileCount": 3, "failedCount": 0}}}
-		case strings.Contains(q, "deleteEpisodeFiles("):
-			return map[string]any{"data": map[string]any{"deleteEpisodeFiles": map[string]any{"fileCount": 1, "failedCount": 2}}}
+		if strings.Contains(q, "mutation") {
+			rec.mutations = append(rec.mutations, map[string]any{"q": q})
 		}
-		t.Errorf("unexpected query: %s", q)
-		return nil
+		return rec.handlerPartial(t, "fp-p", false, 3, 1, 0, 0)(q)
 	})
 	c := NewScryerClient(srv.URL, "k")
 	n, err := c.DeleteEpisodeFiles("T1", []string{"E1", "E2", "E3"})
-	if err == nil || !strings.Contains(err.Error(), "failed") || !strings.Contains(err.Error(), "2") {
-		t.Fatalf("expected partial-failure error naming 2 failed files, got n=%d err=%v", n, err)
+	if err == nil || !strings.Contains(err.Error(), "1 of 3") {
+		t.Fatalf("expected partial-acceptance error naming '1 of 3', got n=%d err=%v", n, err)
 	}
 	if len(*reqs) != 2 {
 		t.Fatalf("expected preview+mutation, got %d requests", len(*reqs))
 	}
 }
 
-func TestDeleteEpisodeFilesReturnsMutationFileCount(t *testing.T) {
-	// The success count comes from the mutation's own fileCount (what was
-	// actually deleted), not the preview's projection.
+func TestDeleteEpisodeFilesReturnsAcceptedCount(t *testing.T) {
+	// The success count is the mutation's acceptedFileIds length — what the
+	// server actually took, not the preview's projection.
+	rec := &deleteRecorder{}
 	srv, _ := fakeGraphQL(t, func(q string) any {
-		switch {
-		case strings.Contains(q, "deleteEpisodeFilesPreview"):
-			return map[string]any{"data": map[string]any{"deleteEpisodeFilesPreview": map[string]any{
-				"preview": map[string]any{"fingerprint": "fp-m", "requiresTypedConfirmation": false,
-					"totalFileCount": 2, "targetLabel": "2 files"},
-				"fileCount": 2, "failedCount": 0}}}
-		case strings.Contains(q, "deleteEpisodeFiles("):
-			return map[string]any{"data": map[string]any{"deleteEpisodeFiles": map[string]any{"fileCount": 5, "failedCount": 0}}}
-		}
-		t.Errorf("unexpected query: %s", q)
-		return nil
+		return rec.handlerPartial(t, "fp-m", false, 2, 5, 0, 0)(q)
 	})
 	c := NewScryerClient(srv.URL, "k")
 	n, err := c.DeleteEpisodeFiles("T1", []string{"E1"})
@@ -377,7 +417,7 @@ func TestDeleteEpisodeFilesReturnsMutationFileCount(t *testing.T) {
 		t.Fatalf("DeleteEpisodeFiles: %v", err)
 	}
 	if n != 5 {
-		t.Errorf("fileCount = %d, want 5 (mutation's actual count, not preview's 2)", n)
+		t.Errorf("accepted = %d, want 5", n)
 	}
 }
 

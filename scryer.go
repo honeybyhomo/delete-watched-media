@@ -271,12 +271,14 @@ func (s *ScryerClient) DeleteEpisodeFiles(titleID string, episodeIDs []string) (
 		return 0, err
 	}
 	const mutQ = `mutation($input: DeleteEpisodeFilesInput!) {
-		deleteEpisodeFiles(input: $input) { fileCount failedCount }
+		deleteEpisodeFiles(input: $input) { acceptedFileIds }
 	}`
+	// Scryer's delete is an async job: the mutation answers with the file
+	// ids it accepted (introspected live 2026-10-28 — there are no sync
+	// fileCount/failedCount fields on this payload type).
 	var out struct {
 		DeleteEpisodeFiles struct {
-			FileCount   int `json:"fileCount"`
-			FailedCount int `json:"failedCount"`
+			AcceptedFileIds []string `json:"acceptedFileIds"`
 		} `json:"deleteEpisodeFiles"`
 	}
 	if err := s.gql(mutQ, map[string]any{"input": map[string]any{
@@ -285,19 +287,15 @@ func (s *ScryerClient) DeleteEpisodeFiles(titleID string, episodeIDs []string) (
 	}}, &out); err != nil {
 		return 0, fmt.Errorf("delete episode files %s: %w", titleID, err)
 	}
-	res := out.DeleteEpisodeFiles
-	if res.FailedCount > 0 {
-		// Partial failure: HTTP 200 + no errors[] but files remain on disk.
-		// Surface it — the affected episodes keep their files and are
-		// retried on a later cycle.
-		return res.FileCount, fmt.Errorf("delete episode files %s: %d of %d selected episode(s) failed (files deleted: %d) — will retry next cycle",
-			titleID, res.FailedCount, len(episodeIDs), res.FileCount)
+	n := len(out.DeleteEpisodeFiles.AcceptedFileIds)
+	if n < p.TotalFileCount {
+		// Fewer files accepted than the preview projected: some deletes
+		// did not happen. The affected files still exist, so the next
+		// cycle retries them.
+		return n, fmt.Errorf("delete episode files %s: only %d of %d previewed file(s) accepted — will retry next cycle",
+			titleID, n, p.TotalFileCount)
 	}
-	if res.FileCount > 0 {
-		return res.FileCount, nil
-	}
-	// Server tolerated a null/zero count payload; fall back to the preview.
-	return p.TotalFileCount, nil
+	return n, nil
 }
 
 // DeleteTitle removes the title and its files from disk (preview+fingerprinted).
@@ -319,11 +317,19 @@ func (s *ScryerClient) DeleteTitle(titleID string) (int, error) {
 		return 0, err
 	}
 	const mutQ = `mutation($input: DeleteTitleInput!) {
-		deleteTitle(input: $input) { fingerprint }
+		deleteTitle(input: $input) { id recyclePurged recyclePreserved recycleBusy recycleFailed }
 	}`
+	// Scryer's title delete runs files through a recycle pipeline
+	// (introspected live 2026-10-28): purged = permanently removed,
+	// preserved = kept in the recycle bin, busy/failed = not cleanly
+	// handled. Busy or failed files remain and are retried next cycle.
 	var out struct {
 		DeleteTitle struct {
-			Fingerprint string `json:"fingerprint"`
+			ID               string `json:"id"`
+			RecyclePurged    int    `json:"recyclePurged"`
+			RecyclePreserved int    `json:"recyclePreserved"`
+			RecycleBusy      int    `json:"recycleBusy"`
+			RecycleFailed    int    `json:"recycleFailed"`
 		} `json:"deleteTitle"`
 	}
 	if err := s.gql(mutQ, map[string]any{"input": map[string]any{
@@ -331,5 +337,10 @@ func (s *ScryerClient) DeleteTitle(titleID string) (int, error) {
 	}}, &out); err != nil {
 		return 0, fmt.Errorf("delete title %s: %w", titleID, err)
 	}
-	return p.TotalFileCount, nil
+	r := out.DeleteTitle
+	if r.RecycleBusy > 0 || r.RecycleFailed > 0 {
+		return r.RecyclePurged + r.RecyclePreserved, fmt.Errorf("delete title %s: recycle busy=%d failed=%d — will retry next cycle",
+			titleID, r.RecycleBusy, r.RecycleFailed)
+	}
+	return r.RecyclePurged + r.RecyclePreserved, nil
 }
