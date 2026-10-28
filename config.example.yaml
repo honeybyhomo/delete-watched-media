@@ -22,8 +22,5 @@ unmonitor_on_watch: true
 # How often to poll Jellyfin, in minutes.
 interval_minutes: 60
 
-# Dry run: log exactly what would happen without changing anything.
-dry_run: false
-
 # debug | info | warn | error
 log_level: info

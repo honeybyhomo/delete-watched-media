@@ -24,7 +24,6 @@ movie_retention_days: 2
 episode_retention_days: 1
 unmonitor_on_watch: true
 interval_minutes: 30
-dry_run: true
 log_level: debug
 `
 
@@ -40,7 +39,7 @@ func TestLoadConfigFullParse(t *testing.T) {
 		t.Errorf("scryer = %+v", c.Scryer)
 	}
 	if c.MovieRetentionDays != 2 || c.EpisodeRetentionDays != 1 || !c.UnmonitorOnWatch ||
-		c.IntervalMinutes != 30 || !c.DryRun || c.LogLevel != "debug" {
+		c.IntervalMinutes != 30 || c.LogLevel != "debug" {
 		t.Errorf("config = %+v", c)
 	}
 }

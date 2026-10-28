@@ -41,7 +41,6 @@ movie_retention_days: 2
 episode_retention_days: 1
 unmonitor_on_watch: true
 interval_minutes: 60
-dry_run: false
 log_level: info
 ```
 
@@ -83,7 +82,7 @@ Put the container on the same Docker network as your Jellyfin/Scryer containers 
 
 ## Safety
 
-- **Start with `dry_run: true`.** It logs every unmonitor and deletion it *would* perform, changing nothing. Flip to `false` once the plan looks right.
+- **There is no dry-run mode** (removed in v0.2.1): every cycle acts for real. Deploying the tool is the decision to delete; old config files carrying a `dry_run` key simply ignore it.
 - Every deletion runs Scryer's preview query first and passes its fingerprint; if Scryer would require a typed confirmation for a delete, the tool refuses rather than bypassing the guard.
 - The tool only ever acts on items **marked watched** for the configured Jellyfin user — never on unwatched media.
 

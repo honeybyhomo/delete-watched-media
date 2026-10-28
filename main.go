@@ -48,7 +48,6 @@ func main() {
 		"movie_retention_days", cfg.MovieRetentionDays,
 		"episode_retention_days", cfg.EpisodeRetentionDays,
 		"interval", interval,
-		"dry_run", cfg.DryRun,
 		"unmonitor_on_watch", cfg.UnmonitorOnWatch,
 		"jellyfin_user", cfg.Jellyfin.Username,
 	)

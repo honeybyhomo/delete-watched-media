@@ -17,7 +17,6 @@ type Config struct {
 	EpisodeRetentionDays int     `yaml:"episode_retention_days"`
 	UnmonitorOnWatch     bool    `yaml:"unmonitor_on_watch"`
 	IntervalMinutes      int     `yaml:"interval_minutes"`
-	DryRun               bool    `yaml:"dry_run"`
 	LogLevel             string  `yaml:"log_level"`
 }
 

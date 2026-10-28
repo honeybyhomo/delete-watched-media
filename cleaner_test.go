@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,7 +47,7 @@ func daysAgo(n int) string {
 	return time.Now().Add(-time.Duration(n) * 24 * time.Hour).Format(time.RFC3339)
 }
 
-func testConfig(dryRun bool) *Config {
+func testConfig() *Config {
 	return &Config{
 		Jellyfin:             Service{URL: "http://jellyfin", Username: "admin"},
 		Scryer:               Service{URL: "http://scryer"},
@@ -57,7 +55,6 @@ func testConfig(dryRun bool) *Config {
 		EpisodeRetentionDays: 1,
 		UnmonitorOnWatch:     true,
 		IntervalMinutes:      60,
-		DryRun:               dryRun,
 		LogLevel:             "info",
 	}
 }
@@ -169,7 +166,7 @@ func TestMoviesUnmonitorOnWatch(t *testing.T) {
 		t.Errorf("unexpected query: %.80s", q)
 		return nil
 	}
-	c, reqs := newCleanerFixture(t, testConfig(false),
+	c, reqs := newCleanerFixture(t, testConfig(),
 		jellyfinResponder(t, []string{watchedMovieFresh()}, nil, nil), respond)
 	if err := c.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -199,7 +196,7 @@ func TestMoviesDeletePastRetention(t *testing.T) {
 		t.Errorf("unexpected query: %.80s", q)
 		return nil
 	}
-	c, reqs := newCleanerFixture(t, testConfig(false),
+	c, reqs := newCleanerFixture(t, testConfig(),
 		jellyfinResponder(t, []string{watchedMovieOld()}, nil, nil), respond)
 	if err := c.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -218,7 +215,7 @@ func TestMovieNotInScryerSkipped(t *testing.T) {
 		t.Errorf("unexpected query: %.80s", q)
 		return nil
 	}
-	c, reqs := newCleanerFixture(t, testConfig(false),
+	c, reqs := newCleanerFixture(t, testConfig(),
 		jellyfinResponder(t, []string{watchedMovieFresh()}, nil, nil), respond)
 	if err := c.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -265,7 +262,7 @@ func seriesScryerRespond(t *testing.T) func(string, map[string]any) any {
 }
 
 func TestEpisodesUnmonitorAndDelete(t *testing.T) {
-	c, reqs := newCleanerFixture(t, testConfig(false),
+	c, reqs := newCleanerFixture(t, testConfig(),
 		jellyfinResponder(t, nil, []string{epFresh(), epOldWithFile(), epOldNoFile()},
 			map[string]string{"js1": "337907"}),
 		seriesScryerRespond(t))
@@ -276,30 +273,6 @@ func TestEpisodesUnmonitorAndDelete(t *testing.T) {
 	want := []string{"unmonE:E1", "unmonE:E2", "unmonE:E3", "delEps:S1:E2"}
 	if !equalStrings(got, want) {
 		t.Errorf("mutations = %v, want %v", got, want)
-	}
-}
-
-func TestDryRunMakesNoMutations(t *testing.T) {
-	c, reqs := newCleanerFixture(t, testConfig(true),
-		jellyfinResponder(t, []string{watchedMovieOld()},
-			[]string{epFresh(), epOldWithFile(), epOldNoFile()},
-			map[string]string{"js1": "337907"}),
-		seriesScryerRespond(t))
-	if err := c.Run(); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if got := mutationKinds(*reqs); len(got) != 0 {
-		t.Errorf("dry-run performed mutations: %v", got)
-	}
-	// lookups still happen so the dry-run log is informative
-	lookups := 0
-	for _, r := range *reqs {
-		if strings.Contains(r.Query, "titlesByExternalIds") {
-			lookups++
-		}
-	}
-	if lookups != 2 {
-		t.Errorf("expected 2 lookups (movie+series), got %d", lookups)
 	}
 }
 
@@ -317,7 +290,7 @@ func TestMovieFacetMismatchSkipped(t *testing.T) {
 		t.Errorf("unexpected query: %.80s", q)
 		return nil
 	}
-	c, reqs := newCleanerFixture(t, testConfig(false),
+	c, reqs := newCleanerFixture(t, testConfig(),
 		jellyfinResponder(t, []string{watchedMovieOld()}, nil, nil), respond)
 	if err := c.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -341,7 +314,7 @@ func TestSeriesFacetMismatchSkipped(t *testing.T) {
 		t.Errorf("unexpected query (facet guard should have skipped): %.80s", q)
 		return nil
 	}
-	c, reqs := newCleanerFixture(t, testConfig(false),
+	c, reqs := newCleanerFixture(t, testConfig(),
 		jellyfinResponder(t, nil, []string{epOldWithFile()}, map[string]string{"js1": "337907"}), respond)
 	if err := c.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -363,7 +336,7 @@ func TestAnimeSeriesStillProcessed(t *testing.T) {
 		}
 		return seriesScryerRespond(t)(q, vars)
 	}
-	c, reqs := newCleanerFixture(t, testConfig(false),
+	c, reqs := newCleanerFixture(t, testConfig(),
 		jellyfinResponder(t, nil, []string{epFresh(), epOldWithFile(), epOldNoFile()},
 			map[string]string{"js1": "337907"}), respond)
 	if err := c.Run(); err != nil {
@@ -376,36 +349,7 @@ func TestAnimeSeriesStillProcessed(t *testing.T) {
 	}
 }
 
-// captureLogs swaps the default slog logger for a buffer while fn runs.
-func captureLogs(t *testing.T, fn func()) string {
-	t.Helper()
-	var buf bytes.Buffer
-	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(old) })
-	fn()
-	return buf.String()
-}
-
-func TestDryRunLogsDoNotClaimActions(t *testing.T) {
-	// Dry-run logs are the go/no-go evidence for enabling real deletions;
-	// they must never claim an action that was not performed.
-	c, _ := newCleanerFixture(t, testConfig(true),
-		jellyfinResponder(t, []string{watchedMovieOld()},
-			[]string{epFresh(), epOldWithFile(), epOldNoFile()},
-			map[string]string{"js1": "337907"}),
-		seriesScryerRespond(t))
-	logs := captureLogs(t, func() {
-		if err := c.Run(); err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-	})
-	for _, phrase := range []string{"unmonitored movies", "unmonitored episodes", "deleted episode files", "deleted movie"} {
-		if strings.Contains(logs, phrase) {
-			t.Errorf("dry-run log claims action: %q", phrase)
-		}
-	}
-	if !strings.Contains(logs, "[dry-run]") {
-		t.Errorf("dry-run log missing [dry-run] lines:\n%s", logs)
-	}
-}
+// captureLogs and the dry-run tests were removed with the dry_run feature
+// itself (v0.2.1) — the log-honesty behavior they pinned (summaries count
+// actual successes) is covered by the unmonitor success counters in
+// cleaner.go and the mutation assertions in the remaining tests.

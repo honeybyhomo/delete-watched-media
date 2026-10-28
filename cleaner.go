@@ -89,29 +89,17 @@ func (c *Cleaner) processMovies(uid string) error {
 
 	unmonitored := 0
 	for _, m := range unmonitor {
-		if c.cfg.DryRun {
-			slog.Info("[dry-run] would unmonitor movie", "title", m.title)
-			continue
-		}
 		if err := c.scryer.SetTitleMonitored(m.id, false); err != nil {
 			slog.Error("unmonitor movie failed", "title", m.title, "error", err)
 		} else {
 			unmonitored++
 		}
 	}
-	if c.cfg.DryRun {
-		if len(unmonitor) > 0 {
-			slog.Info("[dry-run] unmonitor pending movies", "count", len(unmonitor))
-		}
-	} else if unmonitored > 0 {
+	if unmonitored > 0 {
 		slog.Info("unmonitored movies", "count", unmonitored)
 	}
 
 	for _, d := range deletes {
-		if c.cfg.DryRun {
-			slog.Info("[dry-run] would delete movie + files and remove from Scryer", "title", d.title)
-			continue
-		}
 		n, err := c.scryer.DeleteTitle(d.id)
 		if err != nil {
 			slog.Error("delete movie failed", "title", d.title, "error", err)
@@ -216,21 +204,13 @@ func (c *Cleaner) processEpisodes(uid string) error {
 
 		unmonitored := 0
 		for _, e := range unmonitor {
-			if c.cfg.DryRun {
-				slog.Info("[dry-run] would unmonitor episode", "episode", e.label)
-				continue
-			}
 			if err := c.scryer.SetEpisodeMonitored(e.id, false); err != nil {
 				slog.Error("unmonitor episode failed", "episode", e.label, "error", err)
 			} else {
 				unmonitored++
 			}
 		}
-		if c.cfg.DryRun {
-			if len(unmonitor) > 0 {
-				slog.Info("[dry-run] unmonitor pending episodes", "series", ss.Name, "count", len(unmonitor))
-			}
-		} else if unmonitored > 0 {
+		if unmonitored > 0 {
 			slog.Info("unmonitored episodes", "series", ss.Name, "count", unmonitored)
 		}
 
@@ -242,12 +222,6 @@ func (c *Cleaner) processEpisodes(uid string) error {
 		for i, d := range deletes {
 			labels[i] = d.label
 			ids[i] = d.id
-		}
-		if c.cfg.DryRun {
-			for _, l := range labels {
-				slog.Info("[dry-run] would delete episode file", "episode", l)
-			}
-			continue
 		}
 		n, err := c.scryer.DeleteEpisodeFiles(ss.ID, ids)
 		if err != nil {
